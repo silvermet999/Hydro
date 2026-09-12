@@ -11,9 +11,13 @@ early attempts at explainability and causal ML: https://www.geeksforgeeks.org/ar
 do-calculus: https://plato.stanford.edu/entries/causal-models/do-calculus.html
 
 3/ lagrangian constraints (not causal task but worth trying)
-4/ can i commit the code to github (private repo)?
 #####################################################################################
-APROCHING MISSING VALUES:
+OUTLIER HANDLING:
+
+
+
+#####################################################################################
+APPROACHING MISSING VALUES:
 1/ find when feature starts recording:
 all null:
 - 02340009

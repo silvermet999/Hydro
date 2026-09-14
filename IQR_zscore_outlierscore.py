@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import zscore
 import seaborn as sns
+import main
 
 # OUTLIER HANDLING
 def outlier_report(df, numeric_cols):

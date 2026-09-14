@@ -200,6 +200,9 @@ print("loading")
 results = prepare_data()
 x_train, mask_train = results["train"]
 x_val, mask_val = results["valid"]
+data_scaled = results["data_scaled"].to_numpy()
+mask_raw  = results["mask_raw"].to_numpy()
+scaler = results["scaler"]
 dataset = utils.CustomDataset(x_train, mask_train)
 dataset_val = utils.CustomDataset(x_val, mask_val)
 train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=False)
@@ -238,7 +241,7 @@ def training():
       recon_batch = model1(data)
       nseloss = nse_loss(data, recon_batch, mask=mask)
       reconloss = robust_recon_loss(data, recon_batch, mask=mask)
-      loss = 0.2 * nseloss + 0.8 * reconloss
+      loss = 0.1 * nseloss + 0.9 * reconloss
       loss.backward()
       torch.nn.utils.clip_grad_norm_(model1.parameters(), max_norm=5.0)
       optimizer.step()
@@ -253,18 +256,34 @@ def training():
 def validation():
   model1.eval()
   avg_loss = 0.0
-  for batch_idx, (data, mask) in enumerate(val_loader):
-    data = data.to(torch.float).cuda()
-    mask = mask.to(torch.bool).cuda()
+  with torch.no_grad():
+    for batch_idx, (data, mask) in enumerate(val_loader):
+      data = data.to(torch.float).cuda()
+      mask = mask.to(torch.bool).cuda()
 
-    recon_batch = model1(data)
-    nseloss = nse_loss(data, recon_batch, mask=mask)
-    reconloss = robust_recon_loss(data, recon_batch, mask=mask)
-    loss = 0.2 * nseloss + 0.8 * reconloss
-    avg_loss += loss.item()
+      recon_batch = model1(data)
+      nseloss = nse_loss(data, recon_batch, mask=mask)
+      reconloss = robust_recon_loss(data, recon_batch, mask=mask)
+      loss = 0.1 * nseloss + 0.9 * reconloss
+      avg_loss += loss.item()
 
   total_loss = avg_loss / len(val_loader)
   return total_loss
+
+def impute_with_model():
+  model1.load_state_dict(torch.load("model0.23813101649284363.pt")) # generated without windows!!!!!
+  model1.eval()
+
+  with torch.no_grad():
+    x = torch.tensor(data_scaled, dtype=torch.float).cuda()
+    mask = torch.tensor(mask_raw, dtype=torch.float).cuda()
+    recon = model1(x)
+    imputed_scaled = torch.where(mask.bool(), x, recon)
+  imputed_scaled_np = imputed_scaled.cpu().numpy()
+  imputed_real = scaler.inverse_transform(imputed_scaled_np)
+
+  imputed_df = pd.DataFrame(imputed_real, columns=main.features.columns)
+  return imputed_df
 
 for ep in range(epochs):
   training_loss = training()
@@ -272,3 +291,6 @@ for ep in range(epochs):
     val_loss = validation()
     print("VAL LOSS =====> ", val_loss)
     torch.save(model1.state_dict(), f"model{val_loss}.pt")
+
+imputed_df = impute_with_model()
+imputed_df.to_csv('imputed_output.csv', index=False)

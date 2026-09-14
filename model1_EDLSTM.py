@@ -239,9 +239,9 @@ def training():
 
       optimizer.zero_grad()
       recon_batch = model1(data)
-      nseloss = nse_loss(data, recon_batch, mask=mask)
-      reconloss = robust_recon_loss(data, recon_batch, mask=mask)
-      loss = 0.1 * nseloss + 0.9 * reconloss
+      # nseloss = nse_loss(data, recon_batch, mask=mask)
+      loss = robust_recon_loss(data, recon_batch, mask=mask)
+      # loss = 0.1 * nseloss + 0.9 * reconloss
       loss.backward()
       torch.nn.utils.clip_grad_norm_(model1.parameters(), max_norm=5.0)
       optimizer.step()
@@ -262,28 +262,65 @@ def validation():
       mask = mask.to(torch.bool).cuda()
 
       recon_batch = model1(data)
-      nseloss = nse_loss(data, recon_batch, mask=mask)
-      reconloss = robust_recon_loss(data, recon_batch, mask=mask)
-      loss = 0.1 * nseloss + 0.9 * reconloss
+      # nseloss = nse_loss(data, recon_batch, mask=mask)
+      loss = robust_recon_loss(data, recon_batch, mask=mask)
+      # loss = 0.1 * nseloss + 0.9 * reconloss
       avg_loss += loss.item()
 
   total_loss = avg_loss / len(val_loader)
   return total_loss
 
-def impute_with_model():
-  model1.load_state_dict(torch.load("model0.23813101649284363.pt")) # generated without windows!!!!!
-  model1.eval()
+def stitch_overlapping_windows(window_outputs, n_rows, window_size, n_vars):
+  n_windows = window_outputs.shape[0]
+  assert n_windows == n_rows - window_size + 1
 
-  with torch.no_grad():
-    x = torch.tensor(data_scaled, dtype=torch.float).cuda()
-    mask = torch.tensor(mask_raw, dtype=torch.float).cuda()
-    recon = model1(x)
-    imputed_scaled = torch.where(mask.bool(), x, recon)
-  imputed_scaled_np = imputed_scaled.cpu().numpy()
-  imputed_real = scaler.inverse_transform(imputed_scaled_np)
+  sum_recon = np.zeros((n_rows, n_vars), dtype='float32')
+  count = np.zeros((n_rows, 1), dtype='float32')
 
-  imputed_df = pd.DataFrame(imputed_real, columns=main.features.columns)
-  return imputed_df
+  for i in range(n_windows):
+      sum_recon[i:i + window_size] += window_outputs[i]
+      count[i:i + window_size] += 1
+
+  # rows at the very start/end are covered by fewer windows; count
+  # handles that correctly via the division below
+  return sum_recon / count
+
+
+@torch.no_grad()
+def impute_with_model(model_name, window_size=2, batch_size=256):
+
+    model1.load_state_dict(torch.load(model_name))
+    model = model1.cuda()
+    model.eval()
+
+    n_rows, n_vars = data_scaled.shape
+
+    data_windows = make_windows(data_scaled, window_size)
+
+    n_windows = data_windows.shape[0]
+    all_recon = np.zeros_like(data_windows)
+
+    for start in range(0, n_windows, batch_size):
+        end = min(start + batch_size, n_windows)
+        batch = torch.tensor(data_windows[start:end], dtype=torch.float).cuda()
+        recon = model(batch)  # (batch, window_size, n_vars)
+        all_recon[start:end] = recon.cpu().numpy()
+
+    # Stitch overlapping window reconstructions into one continuous series
+    recon_full = stitch_overlapping_windows(all_recon, n_rows, window_size, n_vars)
+
+    # Original mask, aligned row-for-row with data_scaled/recon_full
+
+    # Keep real observed values; substitute reconstruction only where missing
+    imputed_scaled = np.where(mask_raw.astype(bool), data_scaled, recon_full)
+
+    imputed_real = scaler.inverse_transform(imputed_scaled)
+
+    imputed_df = pd.DataFrame(imputed_real, columns=None)  # set columns=your_feature_columns
+    return imputed_df
+
+# imputed_df = impute_with_model("model0.14691463726758958.pt")
+# imputed_df.to_csv('imputed_output.csv', index=False)
 
 for ep in range(epochs):
   training_loss = training()
@@ -292,5 +329,4 @@ for ep in range(epochs):
     print("VAL LOSS =====> ", val_loss)
     torch.save(model1.state_dict(), f"model{val_loss}.pt")
 
-imputed_df = impute_with_model()
-imputed_df.to_csv('imputed_output.csv', index=False)
+

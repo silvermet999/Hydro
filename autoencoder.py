@@ -1,9 +1,16 @@
 import sys
+import os
 
+from OOD_archi import TemporalWideResNet
+
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+os.environ['TORCH_USE_CUDA_DSA'] = "1"
 import torch
 import numpy as np
 import pandas as pd
 from torch import optim
+
+import IQR_zscore_outlierscore
 import utils
 import main
 from AE_archi import DAE
@@ -22,19 +29,26 @@ def training(epoch, model, train_loader_in, train_loader_out, optimizer,
     for batch_idx, (in_set, out_set) in enumerate(zip(train_loader_in, train_loader_out)):
         data = torch.cat((in_set, out_set), 0).to(torch.float).cuda()
 
-        col_has_data = (~torch.isnan(data)).any(dim=0)
-        mean = torch.where(col_has_data, torch.nanmean(data, dim=0), torch.zeros_like(data[0]))
-        var = torch.where(col_has_data,
-                          torch.nanmean((data - mean) ** 2, dim=0),
-                          torch.ones_like(data[0]))
-        std = var.sqrt().clamp_min(1e-6)
-        data_scaled = (data - mean) / std
+        # mean = data.mean(dim=0)
+        # std = data.std(dim=0, unbiased=False)
+        # data_scaled = (data - mean) / std
 
         optimizer.zero_grad()
-        data_null = ~torch.isnan(data_scaled)
-        data_filled = torch.nan_to_num(data_scaled, nan=0.0)
+        data_null = ~torch.isnan(data)
+        data_filled = torch.nan_to_num(data, nan=0.0)
+
+        # mean = torch.where(data_null.any(dim=0), torch.nanmean(data, dim=0), torch.zeros_like(data[0]))
+        # var = torch.where(data_null.any(dim=0),
+        #                   torch.nanmean((data - mean) ** 2, dim=0),
+        #                   torch.ones_like(data[0]))
+        # std = var.sqrt().clamp_min(1e-6)
+        # data_scaled = (data - mean) / std
+
+        v_min, v_max = data_filled.min(), data_filled.max()
+        data_scaled = (data_filled - v_min) / (v_max - v_min)
 
         encoder_input = torch.cat([data_filled, data_null.float()], dim=1)
+        encoder_input = encoder_input.unsqueeze(1)
         recon_batch = model(encoder_input)
         recon_loss = ((recon_batch - data_scaled) ** 2)[data_null].mean()
 
@@ -46,6 +60,7 @@ def training(epoch, model, train_loader_in, train_loader_out, optimizer,
         for _ in range(20):
             bias.requires_grad_()
             aug_input = torch.cat([oe_filled + bias, oe_mask], dim=1)
+            aug_input = aug_input.unsqueeze(1)
             recon_aug = model(aug_input)
             l_sur = ((recon_aug - (oe_filled + bias)) ** 2).mean(1).mean()
             r_sur = bias.abs().mean(-1).mean()
@@ -62,7 +77,8 @@ def training(epoch, model, train_loader_in, train_loader_out, optimizer,
             oe_input = torch.cat([oe_filled + bias.detach(), oe_mask], dim=1)
         else:
             oe_input = torch.cat([oe_filled, oe_mask], dim=1)
-        recon_oe = model(oe_input)
+        oe_input = oe_input.unsqueeze(1)
+        recon_oe = model.pred_emb(oe_input)
 
         l_oe = -((recon_oe - oe_input[:, :oe_filled.shape[1]]) ** 2).mean()
 
@@ -76,7 +92,7 @@ def training(epoch, model, train_loader_in, train_loader_out, optimizer,
 
         sys.stdout.write('\r epoch %2d %d/%d loss %.2f (ce %f, oe %f)' %
                          (epoch, batch_idx + 1, len(train_loader_in), loss_avg, ce_avg, oe_avg))
-    return loss_avg, mean, std
+    return loss_avg
 
 # def validation(model, val_loader, mean, std):
 #     model.eval()
@@ -109,18 +125,31 @@ def training(epoch, model, train_loader_in, train_loader_out, optimizer,
 #     return val_loss
 
 
-ID_data, OOD_data = main.outlier_sc()
+ID_data, OOD_data = IQR_zscore_outlierscore.outlier_sc(main.features, main.df, main.numeric_cols)
 dataset_ID = utils.CustomDataset(ID_data.to_numpy())
 dataset_OOD = utils.CustomDataset(OOD_data.to_numpy())
 train_loader_in, train_loader_out = utils.dataset_function_OOD(dataset_ID, dataset_OOD, batch_size=64, train=True)
 test_loader_in, test_loader_out = utils.dataset_function_OOD(dataset_ID, dataset_OOD, batch_size=32, train=False)
 
 
-epochs = 100
-model = DAE().to(device)
-optimizer = optim.Adam(model.parameters(), lr=1e-2)
+model = TemporalWideResNet(depth=16, widen_factor=2).cuda()
+
+optimizer = torch.optim.SGD(model.parameters(), 0.01, momentum=0.9, weight_decay=0.0005,
+                            nesterov=True)
+
+
+def cosine_annealing(step, total_steps, lr_max, lr_min):
+    return lr_min + (lr_max - lr_min) * 0.5 * (1 + np.cos(step / total_steps * np.pi))
+
+
+scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda step: cosine_annealing(step,
+                                                                                                 50 * len(
+                                                                                                     train_loader_in),
+                                                                                                 1,
+                                                                                                 1e-6 / 0.01))
+epochs = 50
 for epoch in range(1, epochs + 1):
-    train_loss, mean, std = training(epoch, model, train_loader_in, train_loader_out, optimizer)
+    train_loss = training(epoch, model, train_loader_in, train_loader_out, optimizer)
     # if epoch % 10 == 9:
     #     val_loss = validation(model, test_loader_out, mean, std)
     #     torch.save(model.state_dict(), f"model_{val_loss}.pt")

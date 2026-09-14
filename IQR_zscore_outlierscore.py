@@ -10,12 +10,17 @@ def outlier_report(df, numeric_cols):
 
     for col in numeric_cols:
         s = df[col].dropna()
-        Q1 = s.quantile(0.25)
-        Q3 = s.quantile(0.75)
-        IQR = Q3 - Q1
-        lower = Q1 - 1.5 * IQR
-        upper = Q3 + 1.5 * IQR
-        mask = (s < lower) | (s > upper)
+        median = s.median()
+        MAD = (s - median).abs().median()
+
+        # 0.6745 scales MAD to be consistent with standard deviation under normality
+        modified_z = 0.6745 * (s - median) / MAD
+
+        threshold = 3.5  # standard cutoff recommended by Iglewicz & Hoaglin
+        mask = modified_z.abs() > threshold
+
+        lower = median - (threshold / 0.6745) * MAD
+        upper = median + (threshold / 0.6745) * MAD
 
         z = zscore(s)
         Z_mask = abs(z) > 3
@@ -59,20 +64,23 @@ def outlier_sc(features, df, numeric_cols):
     )
     for col in numeric_cols:
         s = df[col].dropna()
-        Q1 = s.quantile(0.25)
-        Q3 = s.quantile(0.75)
-        IQR = Q3 - Q1
-        lower = Q1 - 1.5 * IQR
-        upper = Q3 + 1.5 * IQR
+        median = s.median()
+        MAD = (s - median).abs().median()
 
-        # Lower outliers
+        modified_z = 0.6745 * (s - median) / MAD
+
+        threshold = 3.5  # standard cutoff recommended by Iglewicz & Hoaglin
+        mask = modified_z.abs() > threshold
+
+        lower = median - (threshold / 0.6745) * MAD
+        upper = median + (threshold / 0.6745) * MAD
+
         lower_mask = features[col] < lower
 
         outlier_scores.loc[lower_mask, col] = (
                 (lower - features.loc[lower_mask, col]) / IQR
         )
 
-        # Upper outliers
         upper_mask = features[col] > upper
 
         outlier_scores.loc[upper_mask, col] = (

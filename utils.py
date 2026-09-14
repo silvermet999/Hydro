@@ -6,15 +6,17 @@ import torch
 cuda = True if torch.cuda.is_available() else False
 
 class CustomDataset(Dataset):
-    def __init__(self, data):
+    def __init__(self, data, mask):
         self.data = data
+        self.mask = mask
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        sample = self.data[idx]
-        return sample
+        sample = torch.tensor(self.data[idx], dtype=torch.float)
+        masking = torch.tensor(self.mask[idx], dtype=torch.float)
+        return sample, masking
 
 
 def dataset_function(dataset, batch_size, train=True):

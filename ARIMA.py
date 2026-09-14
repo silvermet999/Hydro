@@ -333,6 +333,21 @@ class ARIMA:
         self.print_stats(data, prediction)
         self.plot_residuals(data, prediction, column_name)
 
+    def check_heteroscedasticity(self, data_set, prediction):
+        residual = data_set - prediction
+        order = np.argsort(prediction)
+        residual_sorted = residual[order]
+        n = len(residual_sorted)
+        q1 = residual_sorted[:n // 4]
+        q4 = residual_sorted[3 * n // 4:]
+        var_low = np.var(q1, ddof=1)
+        var_high = np.var(q4, ddof=1)
+        ratio = var_high / var_low
+        print(f"Variance (low predicted values): {var_low}")
+        print(f"Variance (high predicted values): {var_high}")
+        print(f"Ratio (high/low): {ratio}")
+        return ratio
+
 
 def run_arima_for_column(column_name):
     print("=" * 60)
@@ -355,14 +370,14 @@ def run_arima_for_column(column_name):
     testing_set_values = np.array(values[testing_start:testing_end])
     testing_set_time = np.array(time_col[testing_start:testing_end])
 
-    arima_model = ARIMA(2, 1, 2)
+    arima_model = ARIMA(4, 1, 2)
     arima_model.plot_differance(training_set_values, 0, column_name)
     differance = arima_model.plot_differance(training_set_values, 1, column_name)
 
     arima_model.plot_autocorrelation(differance, 30, column_name)
     arima_model.plot_partial_autocorrelation(differance, 30, column_name)
 
-    arma_model = ARIMA(2, 1, 4)
+    arma_model = ARIMA(4, 1, 4)
     arma_model.set_training_data_set(training_set_values)
     arma_model.set_training_data_time(training_set_time)
 
@@ -375,6 +390,7 @@ def run_arima_for_column(column_name):
     prediction = arma_model.get_prediction(arma_model.training_data)
 
     arma_model.plot_result(arma_model.training_data_time, arma_model.training_data, prediction, column_name)
+    arma_model.check_heteroscedasticity(arma_model.training_data, prediction)
 
     return arma_model, prediction
 

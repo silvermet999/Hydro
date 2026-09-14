@@ -55,23 +55,18 @@ class NetworkBlock(nn.Module):
 
 
 class TemporalWideResNet(nn.Module):
-    def __init__(self, depth, num_classes, num_feats,
-                 widen_factor=1, dropRate=0.0, in_channels=1, embed_features=True):
+    def __init__(self, depth,
+                 widen_factor=1, dropRate=0.0, in_channels=1):
         super(TemporalWideResNet, self).__init__()
         nChannels = [16, 16 * widen_factor, 32 * widen_factor, 64 * widen_factor]
         assert ((depth - 4) % 6 == 0), "depth must satisfy (depth - 4) % 6 == 0"
         n = (depth - 4) // 6
         block = BasicBlock
 
-        self.embed_features = embed_features
-        if embed_features:
-            self.conv1 = nn.Conv2d(in_channels, nChannels[0],
-                                   kernel_size=(1, num_feats), stride=(1, 1),
-                                   padding=0, bias=False)
-        else:
-            self.conv1 = nn.Conv2d(in_channels, nChannels[0],
-                                   kernel_size=(3, 1), stride=(1, 1),
-                                   padding=(1, 0), bias=False)
+
+        self.conv1 = nn.Conv2d(in_channels, nChannels[0],
+                               kernel_size=(3, 1), stride=(1, 1),
+                               padding=(1, 0), bias=False)
 
 
         self.block1 = NetworkBlock(n, nChannels[0], nChannels[1], block, 1, dropRate)
@@ -81,7 +76,7 @@ class TemporalWideResNet(nn.Module):
         self.bn1 = nn.BatchNorm2d(nChannels[3])
         self.relu = nn.ReLU(inplace=True)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(nChannels[3], num_classes)
+        self.fc = nn.Linear(nChannels[3], 296)
         self.nChannels = nChannels[3]
 
         for m in self.modules():
@@ -111,15 +106,19 @@ class TemporalWideResNet(nn.Module):
         return self.fc(out)
 
     def pred_emb(self, x):
+        # print("x", x.shape)
         out = self._prepare_input(x)
+#         print("1", out.shape)
         out = self.conv1(out)
+#         print("2", out.shape)
         out = self.block1(out)
+#         print("3", out.shape)
         out = self.block2(out)
         out = self.block3(out)
-        out = self.relu(self.bn1(out))
-        out = self.avgpool(out)
-        out = out.view(-1, self.nChannels)
-        return self.fc(out), out
+        out = self.bn1(out)
+        out = out.mean(dim=1)
+        out = out.squeeze(1)
+        return out
 
     def intermediate_forward_simple(self, x, layer_index=None):
         out = self._prepare_input(x)

@@ -3,4 +3,3 @@ plots/ARIMA/results
 plots/ARIMA/residuals
 plots/ARIMA/autocorrelation
 plots/ARIMA/difference
-plots/ARIMA/SARIMA

@@ -49,15 +49,33 @@ def mad_bounds(series, mask=None, threshold=3.5):
   is_outlier = np.abs(modified_z) > threshold
   return is_outlier, lower, upper
 
+def series_to_supervised(data, n_in=1, n_out=1):
+  n_vars = 1 if type(data) is list else data.shape[1]
+  df = pd.DataFrame(data)
+  cols, names = list(), list()
+  # input sequence (t-n, ... t-1)
+  for i in range(n_in, 0, -1):
+    cols.append(df.shift(i))
+    names += [('var%d(t-%d)' % (j+1, i)) for j in range(n_vars)]
+  # forecast sequence (t, t+1, ... t+n)
+  for i in range(0, n_out):
+    cols.append(df.shift(-i))
+    if i == 0:
+      names += [('var%d(t)' % (j+1)) for j in range(n_vars)]
+    else:
+      names += [('var%d(t+%d)' % (j+1, i)) for j in range(n_vars)]
+  # put it all together
+  agg = pd.concat(cols, axis=1)
+  agg.columns = names
+  return pd.DataFrame(agg.astype('float32'))
 
-
-def make_windows(data, window_size):
-  windows = np.lib.stride_tricks.sliding_window_view(data, window_size, axis=0)
-  return windows.transpose(0, 2, 1)
-
-
-def make_window_masks(mask, window_size):
-  return make_windows(mask, window_size)
+# def make_windows(data, window_size):
+#   windows = np.lib.stride_tricks.sliding_window_view(data, window_size, axis=0)
+#   return windows.transpose(0, 2, 1)
+#
+#
+# def make_window_masks(mask, window_size):
+#   return make_windows(mask, window_size)
 
 def train_valid_test_split(data, mask_seq, n_train_valid_rows):
   data_train_valid = data.iloc[:n_train_valid_rows,:]
@@ -71,51 +89,117 @@ def train_valid_test_split(data, mask_seq, n_train_valid_rows):
 
   return data_train.values, mask_train.values, data_valid.values, mask_valid.values, data_test.values, mask_test.values
 
-def prepare_data(window_size=2 , n_train_valid_rows=20000,
-                         valid_fraction=0.4, columns=None):
-
+def prepare_data_with(hours_of_history, hours_to_predict):
   raw = main.features
-  if columns is not None:
-    raw = raw[columns]
 
+  # 1. Build the mask from RAW data, before any filling/scaling touches it.
   mask_raw = build_missingness_mask(raw)
+
+  # 2. Fill gaps so the scaler and windowing arithmetic have no NaNs to choke on.
   data_filled = fill_for_scaling(raw)
 
+  # 3. Fit/scale as before, excluding the test period from scaler fitting.
   scaler = MinMaxScaler()
-  scaler.fit(data_filled.iloc[:n_train_valid_rows, :])
+  scaler.fit(data_filled.iloc[:52608, :])
+  q_max = np.max(raw.iloc[:52608, 2])  # manual min/max from RAW (not filled) data
+  q_min = np.min(raw.iloc[:52608, 2])
   data_scaled = pd.DataFrame(scaler.transform(data_filled), columns=data_filled.columns)
 
-  data_train_valid = data_scaled.iloc[:n_train_valid_rows, :].reset_index(drop=True)
-  mask_train_valid = mask_raw.iloc[:n_train_valid_rows, :].reset_index(drop=True)
-  data_test = data_scaled.iloc[n_train_valid_rows:, :].reset_index(drop=True)
-  mask_test = mask_raw.iloc[n_train_valid_rows:, :].reset_index(drop=True)
+  # 4. Window BOTH the scaled data and the mask with identical shifts,
+  #    so mask columns line up 1:1 with data columns (var%d(t-n) etc.)
+  data_sequence = series_to_supervised(data_scaled, hours_of_history, hours_to_predict, dropnan=False)
+  mask_sequence = series_to_supervised(mask_raw, hours_of_history, hours_to_predict, dropnan=False)
 
-  n_valid = int(len(data_train_valid) * valid_fraction)
-  data_train = data_train_valid.iloc[:-n_valid, :].reset_index(drop=True)
-  mask_train = mask_train_valid.iloc[:-n_valid, :].reset_index(drop=True)
-  data_valid = data_train_valid.iloc[-n_valid:, :].reset_index(drop=True)
-  mask_valid = mask_train_valid.iloc[-n_valid:, :].reset_index(drop=True)
+  # Shifting introduces edge NaNs in both (first/last few rows have no
+  # t-n or t+n neighbor). Drop those edge rows from both in lockstep —
+  # this is a windowing artifact, not a missing-sensor-reading gap, so
+  # dropping here is fine and doesn't reintroduce the masking problem.
+  valid_rows = ~data_sequence.isna().any(axis=1)
+  data_sequence = data_sequence[valid_rows].reset_index(drop=True)
+  mask_sequence = mask_sequence[valid_rows].reset_index(drop=True)
+  # mask itself might have NaN at the same edge rows (shift artifact);
+  # treat any remaining mask NaN as "not observed" to be safe.
+  mask_sequence = mask_sequence.fillna(0.0)
 
-  # def window_split(data_df, mask_df):
-  #   windows = make_windows(data_df.to_numpy(dtype='float32'), window_size)
-  #   mask_windows = make_window_masks(mask_df.to_numpy(dtype='float32'), window_size)
-  #   return windows, mask_windows
+  # NOTE: 52608 was an index into the RAW data. After windowing with
+  # series_to_supervised + dropping edge rows, row alignment shifts by
+  # hours_of_history rows. Adjust the boundary accordingly:
+  n_train_valid_rows = 52608 - hours_of_history
 
-  train_windows = make_windows(data_train.to_numpy(dtype='float32'), window_size)
-  train_mask = make_window_masks(mask_train.to_numpy(dtype='float32'), window_size)
-  valid_windows = make_windows(data_valid.to_numpy(dtype='float32'), window_size)
-  valid_mask = make_window_masks(mask_valid.to_numpy(dtype='float32'), window_size)
+  (train_x, train_mask,
+   valid_x, valid_mask,
+   test_x, test_mask) = train_valid_test_split(data_sequence, mask_sequence, n_train_valid_rows)
+
+  def split_encoder_decoder(arr, mask_arr):
+    rainfall = arr[:, 0::3].reshape(-1, hours_of_history + hours_to_predict, 1)
+    discharge_all = arr[:, 2::3].reshape(-1, hours_of_history + hours_to_predict, 1)
+    x_discharge = discharge_all[:, :hours_of_history, :]
+    y = discharge_all[:, hours_of_history:, :]
+    x_et = arr[:, 3 * hours_of_history + 1].reshape(-1, 1)
+
+    # same slicing applied to the mask so y_mask lines up with y exactly
+    discharge_mask_all = mask_arr[:, 2::3].reshape(-1, hours_of_history + hours_to_predict, 1)
+    y_mask = discharge_mask_all[:, hours_of_history:, :]
+
+    return x_et, x_discharge, rainfall, y, y_mask
+
+  train_x_et, train_x_discharge, train_x_rainfall, train_y, train_y_mask = split_encoder_decoder(train_x, train_mask)
+  valid_x_et, valid_x_discharge, valid_x_rainfall, valid_y, valid_y_mask = split_encoder_decoder(valid_x, valid_mask)
+  test_x_et, test_x_discharge, test_x_rainfall, test_y, test_y_mask = split_encoder_decoder(test_x, test_mask)
+
+  return (
+    [train_x_et, train_x_discharge, train_x_rainfall], train_y, train_y_mask,
+    [valid_x_et, valid_x_discharge, valid_x_rainfall], valid_y, valid_y_mask,
+    [test_x_et, test_x_discharge, test_x_rainfall], test_y, test_y_mask,
+    q_max, q_min
+  )
+
+
+# def prepare_data(window_size=2 , n_train_valid_rows=20000,
+#                          valid_fraction=0.4, columns=None):
+#
+#   raw = main.features
+#   if columns is not None:
+#     raw = raw[columns]
+#
+#   mask_raw = build_missingness_mask(raw)
+#   data_filled = fill_for_scaling(raw)
+#
+#   scaler = MinMaxScaler()
+#   scaler.fit(data_filled.iloc[:n_train_valid_rows, :])
+#   data_scaled = pd.DataFrame(scaler.transform(data_filled), columns=data_filled.columns)
+#
+#   data_train_valid = data_scaled.iloc[:n_train_valid_rows, :].reset_index(drop=True)
+#   mask_train_valid = mask_raw.iloc[:n_train_valid_rows, :].reset_index(drop=True)
+#   data_test = data_scaled.iloc[n_train_valid_rows:, :].reset_index(drop=True)
+#   mask_test = mask_raw.iloc[n_train_valid_rows:, :].reset_index(drop=True)
+#
+#   n_valid = int(len(data_train_valid) * valid_fraction)
+#   data_train = data_train_valid.iloc[:-n_valid, :].reset_index(drop=True)
+#   mask_train = mask_train_valid.iloc[:-n_valid, :].reset_index(drop=True)
+#   data_valid = data_train_valid.iloc[-n_valid:, :].reset_index(drop=True)
+#   mask_valid = mask_train_valid.iloc[-n_valid:, :].reset_index(drop=True)
+#
+#   # def window_split(data_df, mask_df):
+#   #   windows = make_windows(data_df.to_numpy(dtype='float32'), window_size)
+#   #   mask_windows = make_window_masks(mask_df.to_numpy(dtype='float32'), window_size)
+#   #   return windows, mask_windows
+#
+#   train_windows = make_windows(data_train.to_numpy(dtype='float32'), window_size)
+#   train_mask = make_window_masks(mask_train.to_numpy(dtype='float32'), window_size)
+#   valid_windows = make_windows(data_valid.to_numpy(dtype='float32'), window_size)
+#   valid_mask = make_window_masks(mask_valid.to_numpy(dtype='float32'), window_size)
   # valid_windows, valid_mask_windows = window_split(data_valid, mask_valid)
   # test_windows, test_mask_windows = window_split(data_test, mask_test)
 
-  return {
-    "train": (train_windows, train_mask),
-    "valid": (valid_windows, valid_mask),
-    "test": (data_test, mask_test),
-    "scaler": scaler,
-    "data_scaled": data_scaled,
-    "mask_raw": mask_raw,
-  }
+  # return {
+  #   "train": (train_windows, train_mask),
+  #   "valid": (valid_windows, valid_mask),
+  #   "test": (data_test, mask_test),
+  #   "scaler": scaler,
+  #   "data_scaled": data_scaled,
+  #   "mask_raw": mask_raw,
+  # }
 
 
 # define custome loss function (you can use the simple 'mse' as well)
